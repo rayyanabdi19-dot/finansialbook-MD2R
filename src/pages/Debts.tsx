@@ -1,30 +1,42 @@
 import { useState } from "react";
-import { Plus, Trash2, CheckCircle2, Circle } from "lucide-react";
+import { Plus, Trash2, CheckCircle2, Circle, CalendarIcon } from "lucide-react";
+import { format } from "date-fns";
+import { id as localeId } from "date-fns/locale";
 import { motion, AnimatePresence } from "framer-motion";
+import { cn } from "@/lib/utils";
 import PageShell from "@/components/PageShell";
 import { useFinanceStore } from "@/lib/store";
 import { formatRupiah } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
+import { Calendar } from "@/components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 
 export default function Debts() {
-  const { debts, addDebt, updateDebt, deleteDebt } = useFinanceStore();
+  const { debts, addDebt, updateDebt, deleteDebt, addNotification } = useFinanceStore();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
   const [paid, setPaid] = useState("");
-  const [dueDate, setDueDate] = useState("");
+  const [dueDate, setDueDate] = useState<Date | undefined>();
   const [payId, setPayId] = useState<string | null>(null);
   const [payAmount, setPayAmount] = useState("");
+  const [payDate, setPayDate] = useState<Date | undefined>(new Date());
 
   const handleSubmit = () => {
     if (!name.trim() || !parseFloat(amount)) return;
     const paidAmt = parseFloat(paid) || 0;
     const totalAmt = parseFloat(amount);
-    addDebt({ name: name.trim(), amount: totalAmt, paid: paidAmt, dueDate, isPaidOff: paidAmt >= totalAmt });
-    setName(""); setAmount(""); setPaid(""); setDueDate("");
+    addDebt({
+      name: name.trim(),
+      amount: totalAmt,
+      paid: paidAmt,
+      dueDate: dueDate ? dueDate.toISOString().split("T")[0] : "",
+      isPaidOff: paidAmt >= totalAmt,
+    });
+    setName(""); setAmount(""); setPaid(""); setDueDate(undefined);
     setOpen(false);
   };
 
@@ -35,8 +47,10 @@ export default function Debts() {
     if (d) {
       const newPaid = Math.min(d.paid + amt, d.amount);
       updateDebt(id, { paid: newPaid, isPaidOff: newPaid >= d.amount });
+      const dateStr = payDate ? format(payDate, "dd MMM yyyy", { locale: localeId }) : "";
+      addNotification(`Pembayaran ${formatRupiah(amt)} untuk "${d.name}"${dateStr ? ` pada ${dateStr}` : ""}`);
     }
-    setPayAmount(""); setPayId(null);
+    setPayAmount(""); setPayId(null); setPayDate(new Date());
   };
 
   const activeDebts = debts.filter((d) => !d.isPaidOff);
@@ -56,7 +70,17 @@ export default function Debts() {
               <Input placeholder="Nama / keterangan" value={name} onChange={(e) => setName(e.target.value)} maxLength={50} />
               <Input type="number" placeholder="Total hutang (Rp)" value={amount} onChange={(e) => setAmount(e.target.value)} />
               <Input type="number" placeholder="Sudah dibayar (Rp)" value={paid} onChange={(e) => setPaid(e.target.value)} />
-              <Input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className={cn("w-full justify-start text-left font-normal", !dueDate && "text-muted-foreground")}>
+                    <CalendarIcon className="mr-2 h-4 w-4" />
+                    {dueDate ? format(dueDate, "dd MMMM yyyy", { locale: localeId }) : "Pilih jatuh tempo"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <Calendar mode="single" selected={dueDate} onSelect={setDueDate} initialFocus className="p-3 pointer-events-auto" />
+                </PopoverContent>
+              </Popover>
               <Button onClick={handleSubmit} className="w-full">Simpan</Button>
             </div>
           </DialogContent>
@@ -86,14 +110,29 @@ export default function Debts() {
                 </div>
                 <Progress value={pct} className="h-2 mb-1" />
                 <p className="text-right text-xs font-medium text-debt">{pct}%</p>
+
                 {payId === d.id ? (
-                  <div className="mt-2 flex gap-2">
-                    <Input type="number" placeholder="Jumlah bayar" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} className="h-8 text-sm" />
-                    <Button size="sm" onClick={() => handlePay(d.id)} className="h-8 bg-debt hover:bg-debt/90 text-primary-foreground">Bayar</Button>
-                    <Button size="sm" variant="ghost" onClick={() => setPayId(null)} className="h-8">Batal</Button>
+                  <div className="mt-3 space-y-2 rounded-lg border border-border p-3">
+                    <p className="text-xs font-medium text-foreground">Pembayaran Hutang</p>
+                    <Input type="number" placeholder="Jumlah bayar (Rp)" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} className="h-9 text-sm" />
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button variant="outline" size="sm" className={cn("w-full justify-start text-left font-normal h-9", !payDate && "text-muted-foreground")}>
+                          <CalendarIcon className="mr-2 h-3.5 w-3.5" />
+                          {payDate ? format(payDate, "dd MMM yyyy", { locale: localeId }) : "Tanggal bayar"}
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-auto p-0" align="start">
+                        <Calendar mode="single" selected={payDate} onSelect={setPayDate} initialFocus className="p-3 pointer-events-auto" />
+                      </PopoverContent>
+                    </Popover>
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={() => handlePay(d.id)} className="flex-1 h-8 bg-debt hover:bg-debt/90 text-primary-foreground">Bayar</Button>
+                      <Button size="sm" variant="ghost" onClick={() => { setPayId(null); setPayAmount(""); setPayDate(new Date()); }} className="h-8">Batal</Button>
+                    </div>
                   </div>
                 ) : (
-                  <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" onClick={() => setPayId(d.id)}>+ Bayar</Button>
+                  <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" onClick={() => { setPayId(d.id); setPayDate(new Date()); }}>+ Bayar</Button>
                 )}
               </motion.div>
             );
