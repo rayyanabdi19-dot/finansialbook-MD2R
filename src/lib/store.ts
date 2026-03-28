@@ -1,80 +1,153 @@
-import { create } from "zustand";
-import { persist } from "zustand/middleware";
-import type { Transaction, SavingsGoal, Debt } from "./types";
+import { supabase } from "@/integrations/supabase/client";
+import type { Database } from "@/integrations/supabase/types";
 
-interface FinanceStore {
-  transactions: Transaction[];
-  savingsGoals: SavingsGoal[];
-  debts: Debt[];
-  notifications: { id: string; message: string; date: string }[];
+type DbTransaction = Database["public"]["Tables"]["transactions"]["Row"];
+type DbDebt = Database["public"]["Tables"]["debts"]["Row"];
+type DbSavingsGoal = Database["public"]["Tables"]["savings_goals"]["Row"];
+type DbDebtHistory = Database["public"]["Tables"]["debt_history"]["Row"];
 
-  addTransaction: (t: Omit<Transaction, "id">) => void;
-  updateTransaction: (id: string, t: Partial<Transaction>) => void;
-  deleteTransaction: (id: string) => void;
+// Query helpers
+export const api = {
+  // Transactions
+  async getTransactions() {
+    const { data, error } = await supabase
+      .from("transactions")
+      .select("*")
+      .order("date", { ascending: false });
+    if (error) throw error;
+    return data as DbTransaction[];
+  },
+  async addTransaction(t: Omit<DbTransaction, "id" | "created_at" | "updated_at" | "user_id">) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error("Not authenticated");
+    const { data, error } = await supabase
+      .from("transactions")
+      .insert({ ...t, user_id: user.id })
+      .select()
+      .single();
+    if (error) throw error;
+    return data;
+  },
+  async updateTransaction(id: string, t: Partial<DbTransaction>) {
+    const { error } = await supabase.from("transactions").update(t).eq("id", id);
+    if (error) throw error;
+  },
+  async deleteTransaction(id: string) {
+    const { error } = await supabase.from("transactions").delete().eq("id", id);
+    if (error) throw error;
+  },
 
-  addSavingsGoal: (g: Omit<SavingsGoal, "id">) => void;
-  updateSavingsGoal: (id: string, g: Partial<SavingsGoal>) => void;
-  deleteSavingsGoal: (id: string) => void;
+  // Savings Goals
+  async getSavingsGoals() {
+    const { data, error } = await supabase
+      .from("savings_goals")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    return data as DbSavingsGoal[];
+  },
+  async addSavingsGoal(g: Omit<DbSavingsGoal, "id" | "created_at" | "updated_at" | "user_id">) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error("Not authenticated");
+    const { data, error } = await supabase
+      .from("savings_goals")
+      .insert({ ...g, user_id: user.id })
+      .select()
+      .single();
+    if (error) throw error;
+    return data;
+  },
+  async updateSavingsGoal(id: string, g: Partial<DbSavingsGoal>) {
+    const { error } = await supabase.from("savings_goals").update(g).eq("id", id);
+    if (error) throw error;
+  },
+  async deleteSavingsGoal(id: string) {
+    const { error } = await supabase.from("savings_goals").delete().eq("id", id);
+    if (error) throw error;
+  },
 
-  addDebt: (d: Omit<Debt, "id">) => void;
-  updateDebt: (id: string, d: Partial<Debt>) => void;
-  deleteDebt: (id: string) => void;
+  // Debts
+  async getDebts() {
+    const { data, error } = await supabase
+      .from("debts")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    return data as DbDebt[];
+  },
+  async addDebt(d: Omit<DbDebt, "id" | "created_at" | "updated_at" | "user_id">) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error("Not authenticated");
+    const { data, error } = await supabase
+      .from("debts")
+      .insert({ ...d, user_id: user.id })
+      .select()
+      .single();
+    if (error) throw error;
+    // Add created history
+    await supabase.from("debt_history").insert({
+      user_id: user.id,
+      debt_id: data.id,
+      action: "created",
+      amount: d.amount,
+      note: `Hutang "${d.name}" dibuat`,
+    });
+    return data;
+  },
+  async updateDebt(id: string, d: Partial<DbDebt>) {
+    const { error } = await supabase.from("debts").update(d).eq("id", id);
+    if (error) throw error;
+  },
+  async deleteDebt(id: string) {
+    const { error } = await supabase.from("debts").delete().eq("id", id);
+    if (error) throw error;
+  },
+  async payDebt(id: string, amount: number, actionDate: string, note?: string) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error("Not authenticated");
+    const { data: debt } = await supabase.from("debts").select("*").eq("id", id).single();
+    if (!debt) throw new Error("Debt not found");
+    const newPaid = Math.min(debt.paid + amount, debt.amount);
+    const isPaidOff = newPaid >= debt.amount;
+    await supabase.from("debts").update({ paid: newPaid, is_paid_off: isPaidOff }).eq("id", id);
+    // Payment history
+    await supabase.from("debt_history").insert({
+      user_id: user.id,
+      debt_id: id,
+      action: "payment",
+      amount,
+      action_date: actionDate,
+      note: note || `Pembayaran Rp ${amount.toLocaleString("id-ID")}`,
+    });
+    // Paid off history
+    if (isPaidOff) {
+      await supabase.from("debt_history").insert({
+        user_id: user.id,
+        debt_id: id,
+        action: "paid_off",
+        note: `Hutang "${debt.name}" lunas!`,
+        action_date: actionDate,
+      });
+    }
+    return { newPaid, isPaidOff };
+  },
 
-  addNotification: (message: string) => void;
-  clearNotifications: () => void;
-}
+  // Debt History
+  async getDebtHistory(debtId: string) {
+    const { data, error } = await supabase
+      .from("debt_history")
+      .select("*")
+      .eq("debt_id", debtId)
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    return data as DbDebtHistory[];
+  },
 
-const uid = () => crypto.randomUUID();
-
-export const useFinanceStore = create<FinanceStore>()(
-  persist(
-    (set) => ({
-      transactions: [
-        { id: uid(), type: "income", amount: 8500000, category: "Gaji", description: "Gaji Maret", date: "2026-03-01" },
-        { id: uid(), type: "expense", amount: 1200000, category: "Makanan", description: "Groceries", date: "2026-03-05" },
-        { id: uid(), type: "expense", amount: 500000, category: "Transportasi", description: "Bensin", date: "2026-03-08" },
-        { id: uid(), type: "income", amount: 2000000, category: "Freelance", description: "Project web", date: "2026-03-10" },
-        { id: uid(), type: "expense", amount: 350000, category: "Hiburan", description: "Netflix & Spotify", date: "2026-03-12" },
-        { id: uid(), type: "expense", amount: 800000, category: "Tagihan", description: "Listrik & Air", date: "2026-03-15" },
-      ],
-      savingsGoals: [
-        { id: uid(), name: "Dana Darurat", target: 30000000, current: 12000000, deadline: "2026-12-31" },
-        { id: uid(), name: "Liburan Bali", target: 5000000, current: 3200000, deadline: "2026-06-01" },
-      ],
-      debts: [
-        { id: uid(), name: "Pinjaman Teman", amount: 2000000, paid: 500000, dueDate: "2026-04-15", isPaidOff: false },
-        { id: uid(), name: "Cicilan Laptop", amount: 6000000, paid: 6000000, dueDate: "2026-03-01", isPaidOff: true },
-      ],
-      notifications: [],
-
-      addTransaction: (t) =>
-        set((s) => ({
-          transactions: [{ ...t, id: uid() }, ...s.transactions],
-          notifications: [{ id: uid(), message: `Transaksi ${t.type === "income" ? "pemasukan" : "pengeluaran"} Rp ${t.amount.toLocaleString("id-ID")} ditambahkan`, date: new Date().toISOString() }, ...s.notifications],
-        })),
-      updateTransaction: (id, t) =>
-        set((s) => ({ transactions: s.transactions.map((x) => (x.id === id ? { ...x, ...t } : x)) })),
-      deleteTransaction: (id) =>
-        set((s) => ({ transactions: s.transactions.filter((x) => x.id !== id) })),
-
-      addSavingsGoal: (g) =>
-        set((s) => ({ savingsGoals: [{ ...g, id: uid() }, ...s.savingsGoals] })),
-      updateSavingsGoal: (id, g) =>
-        set((s) => ({ savingsGoals: s.savingsGoals.map((x) => (x.id === id ? { ...x, ...g } : x)) })),
-      deleteSavingsGoal: (id) =>
-        set((s) => ({ savingsGoals: s.savingsGoals.filter((x) => x.id !== id) })),
-
-      addDebt: (d) =>
-        set((s) => ({ debts: [{ ...d, id: uid() }, ...s.debts] })),
-      updateDebt: (id, d) =>
-        set((s) => ({ debts: s.debts.map((x) => (x.id === id ? { ...x, ...d } : x)) })),
-      deleteDebt: (id) =>
-        set((s) => ({ debts: s.debts.filter((x) => x.id !== id) })),
-
-      addNotification: (message) =>
-        set((s) => ({ notifications: [{ id: uid(), message, date: new Date().toISOString() }, ...s.notifications] })),
-      clearNotifications: () => set({ notifications: [] }),
-    }),
-    { name: "finance-store" }
-  )
-);
+  // Profile
+  async getProfile() {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return null;
+    const { data } = await supabase.from("profiles").select("*").eq("user_id", user.id).single();
+    return data;
+  },
+};
